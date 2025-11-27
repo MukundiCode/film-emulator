@@ -23,30 +23,6 @@ fn dot(v1: [f32; 3], v2: [f32; 3]) -> f32 {
     v1[0] * v2[0] + v1[1] * v2[1] + v1[2] * v2[2]
 }
 
-// --- FILM MODULES ---
-
-fn apply_subtractive_density(rgb: [f32; 3], saturation: f32) -> [f32; 3] {
-    let cmy = [1.0 - rgb[0], 1.0 - rgb[1], 1.0 - rgb[2]];
-    let luma_weights = [0.2126, 0.7152, 0.0722];
-    let dye_luma = dot(cmy, luma_weights);
-
-    let cmy_dense = [
-        mix(dye_luma, cmy[0], saturation),
-        mix(dye_luma, cmy[1], saturation),
-        mix(dye_luma, cmy[2], saturation)
-    ];
-
-    [
-        (1.0 - cmy_dense[0]).clamp(0.0, 1.0),
-        (1.0 - cmy_dense[1]).clamp(0.0, 1.0),
-        (1.0 - cmy_dense[2]).clamp(0.0, 1.0)
-    ]
-}
-
-fn film_curve(x: f32, k: f32, x0: f32) -> f32 {
-    1.0 / (1.0 + (-k * (x - x0)).exp())
-}
-
 // --- THE NEW LIBRAW LOADER (Using Unsafe C-Bindings) ---
 
 fn load_image_to_linear_rgb(path: &String) -> (u32, u32, Vec<[f32; 3]>) {
