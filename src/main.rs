@@ -457,7 +457,7 @@ impl Node for GammaEncodeNode {
 struct Args {
     image_in: String,
 
-    #[arg(default_value = "film_output.png")]
+    #[arg(default_value = "images/film_output.png")]
     image_out: String,
 
     #[arg(short, long)]
