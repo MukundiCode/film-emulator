@@ -3,12 +3,15 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use image::{ImageBuffer, Rgb, ImageReader};
+use image::{Rgb, ImageReader};
+use std::default::Default;
 use std::env;
 use std::ffi::CString;
 use std::slice;
-use clap::builder::TypedValueParser;
 use clap::Parser;
+use wgpu::{InstanceDescriptor};
+use pollster::FutureExt;
+
 
 // 2. INCLUDE THE GENERATED BINDINGS
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
@@ -129,86 +132,245 @@ fn load_image_to_linear_rgb(path: &String) -> (u32, u32, Vec<[f32; 3]>) {
     (w, h, out)
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-
     let output_path = args.image_out;
 
     let (width, height, pixels) = load_image_to_linear_rgb(&args.image_in);
-    let mut output_buffer = ImageBuffer::<Rgb<u8>, Vec<u8>>::new(width, height);
 
     println!("Processing {} pixels...", width * height);
 
-    // creating nodes
-    let mut nodes: Vec<Box<dyn Node>> = Vec::new();
-    match args.exposure {
-        None => {}
-        Some(exposure) => {nodes.push(Box::new(ExposureNode {exposure}))}
+    // --- GPU Setup ---
+
+    let instance = wgpu::Instance::new(&InstanceDescriptor::from_env_or_default());
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        })
+        .block_on()
+        .expect("Failed to find adapter");
+
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor::default())
+        .block_on()?;
+
+    // --- Create textures ---
+    let texture_size = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+
+    let input_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Input Texture"),
+        size: texture_size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    queue.write_texture(
+        input_texture.as_image_copy(),
+        bytemuck::cast_slice(&pixels),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * width),
+            rows_per_image: None,
+        },
+        texture_size,
+    );
+
+    let output_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Output Texture"),
+        size: texture_size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+
+    // --- Create compute pipeline ---
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Grayscale Shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shader.wgsl").into()),
+    });
+
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Grayscale Pipeline"),
+        layout: None,
+        module: &shader,
+        entry_point: Some("shader_main"),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    // --- Bind Group ---
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Textures Bind Group"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(
+                    &input_texture.create_view(&Default::default()),
+                ),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(
+                    &output_texture.create_view(&Default::default()),
+                ),
+            },
+        ],
+    });
+
+    // --- Dispatch compute ---
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+
+    let (wg_x, wg_y) = (
+        (width + 15) / 16,
+        (height + 15) / 16,
+    );
+
+    {
+        let mut compute_pass = encoder.begin_compute_pass(&Default::default());
+        compute_pass.set_pipeline(&pipeline);
+        compute_pass.set_bind_group(0, &bind_group, &[]);
+        compute_pass.dispatch_workgroups(wg_x, wg_y, 1);
     }
 
-    match args.contrast {
-        None => {}
-        Some(contrast) => { nodes.push(Box::new(ContrastNode {contrast}))}
+    // --- Copy result into CPU buffer ---
+
+    let padded_bytes_per_row = ((width * 4 + 255) / 256) * 256;
+    let output_buffer_size = padded_bytes_per_row as u64 * height as u64;
+
+    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Output Buffer"),
+        size: output_buffer_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    encoder.copy_texture_to_buffer(
+        output_texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &output_buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(height),
+            },
+        },
+        texture_size,
+    );
+
+    queue.submit(Some(encoder.finish()));
+
+    // --- Read back data ---
+
+    let buffer_slice = output_buffer.slice(..);
+    buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
+    device.poll(wgpu::PollType::wait_indefinitely())?;
+
+    let data = buffer_slice.get_mapped_range();
+
+    let mut final_pixels = vec![0u8; (width * height * 4) as usize];
+
+    for (row, chunk) in data
+        .chunks_exact(padded_bytes_per_row as usize)
+        .zip(final_pixels.chunks_exact_mut((width * 4) as usize))
+    {
+        chunk.copy_from_slice(&row[..(width * 4) as usize]);
     }
 
-    match args.saturation {
-        None => {}
-        Some(saturation) => { nodes.push(Box::new(SaturationNode {saturation}))}
-    }
+    drop(data);
+    output_buffer.unmap();
 
-    nodes.push(Box::new(SubtractiveDensityNode {
-        density_saturation: args.density_saturation
-    }));
+    // Save
+    let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, final_pixels)
+        .expect("Failed to construct image");
 
-    nodes.push(Box::new(FilmCurveNode {
-        k_contrast: args.k_contrast,
-        x0_offset: args.x0_offset
-    }));
+    img.save(&output_path)?;
+    println!("Saved to {}", output_path);
 
+    Ok(())
+
+
+    // // creating nodes
+    // let mut nodes: Vec<Box<dyn Node>> = Vec::new();
+    // match args.exposure {
+    //     None => {}
+    //     Some(exposure) => {nodes.push(Box::new(ExposureNode {exposure}))}
+    // }
+    //
+    // match args.contrast {
+    //     None => {}
+    //     Some(contrast) => { nodes.push(Box::new(ContrastNode {contrast}))}
+    // }
+    //
+    // match args.saturation {
+    //     None => {}
+    //     Some(saturation) => { nodes.push(Box::new(SaturationNode {saturation}))}
+    // }
+    //
+    // nodes.push(Box::new(SubtractiveDensityNode {
+    //     density_saturation: args.density_saturation
+    // }));
+    //
+    // nodes.push(Box::new(FilmCurveNode {
+    //     k_contrast: args.k_contrast,
+    //     x0_offset: args.x0_offset
+    // }));
+    //
     // nodes.push(Box::new(GammaEncodeNode {
     //     gamma: 1.0 / 2.2
     // }));
-
-    for y in 0..height {
-        for x in 0..width {
-            let i = (y * width + x) as usize;
-            let [r, g, b] = pixels[i];
-
-            let mut pixel = Rgb([r, g, b]);
-            for node in &nodes {
-                pixel = node.transform(pixel);
-            }
-
-            // Gamma Encode
-            let gamma = 1.0 / 2.2;
-            output_buffer
-                .put_pixel(x, y, Rgb(pixel.0.map(|x| (x.powf(gamma) * 255.0).clamp(0.0, 255.9) as u8)));
-        }
-    }
-
+    //
     // for y in 0..height {
     //     for x in 0..width {
     //         let i = (y * width + x) as usize;
     //         let [r, g, b] = pixels[i];
     //
-    //         let dense = apply_subtractive_density([r, g, b], density_saturation);
-    //
-    //         let r_fin = film_curve(dense[0], k_contrast, x0_offset);
-    //         let g_fin = film_curve(dense[1], k_contrast, x0_offset);
-    //         let b_fin = film_curve(dense[2], k_contrast, x0_offset);
+    //         let mut pixel = Rgb([r, g, b]);
+    //         for node in &nodes {
+    //             pixel = node.transform(pixel);
+    //         }
     //
     //         // Gamma Encode
     //         let gamma = 1.0 / 2.2;
-    //         let out_r = (r_fin.powf(gamma) * 255.0).clamp(0.0, 255.0) as u8;
-    //         let out_g = (g_fin.powf(gamma) * 255.0).clamp(0.0, 255.0) as u8;
-    //         let out_b = (b_fin.powf(gamma) * 255.0).clamp(0.0, 255.0) as u8;
-    //
-    //         output_buffer.put_pixel(x, y, Rgb([out_r, out_g, out_b]));
+    //         output_buffer
+    //             .put_pixel(x, y, Rgb(pixel.0.map(|x| (x.powf(gamma) * 255.0).clamp(0.0, 255.9) as u8)));
     //     }
     // }
+    //
+    // output_buffer.save(&output_path).unwrap();
+    // println!("Success! Saved to {}", output_path);
+}
 
-    output_buffer.save(&output_path).unwrap();
-    println!("Success! Saved to {}", output_path);
+fn compute_work_group_count(
+    (width, height): (u32, u32),
+    (workgroup_width, workgroup_height): (u32, u32),
+) -> (u32, u32) {
+    let x = (width + workgroup_width - 1) / workgroup_width;
+    let y = (height + workgroup_height - 1) / workgroup_height;
+
+    (x, y)
+}
+
+fn padded_bytes_per_row(width: u32) -> usize {
+    let bytes_per_row = width as usize * 4;
+    let padding = (256 - bytes_per_row % 256) % 256;
+    bytes_per_row + padding
 }
 
 trait Node {
@@ -286,7 +448,7 @@ struct GammaEncodeNode {
 }
 
 impl Node for GammaEncodeNode {
-    fn transform(&self, pixel: Rgb<f32>) -> Rgb<f32> {
+    fn transform(&self, _pixel: Rgb<f32>) -> Rgb<f32> {
         todo!()
     }
 }
