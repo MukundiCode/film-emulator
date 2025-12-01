@@ -10,6 +10,7 @@ use std::ffi::CString;
 use std::slice;
 use clap::Parser;
 use wgpu::{InstanceDescriptor};
+use wgpu::util::DeviceExt;
 use pollster::FutureExt;
 
 
@@ -136,6 +137,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let output_path = args.image_out;
 
+    let settings = Settings {
+        exposure: args.exposure,
+        contrast: args.contrast,
+        saturation: args.saturation
+    };
+
     let (width, height, pixels) = load_image_to_linear_rgb(&args.image_in);
 
     println!("Processing {} pixels...", width * height);
@@ -174,9 +181,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         view_formats: &[],
     });
 
+    let mut rgba8 = Vec::with_capacity((width * height * 4) as usize);
+
+    for [r, g, b] in pixels {
+        rgba8.push((r * 255.0).clamp(0.0, 255.0) as u8);
+        rgba8.push((g * 255.0).clamp(0.0, 255.0) as u8);
+        rgba8.push((b * 255.0).clamp(0.0, 255.0) as u8);
+        rgba8.push(255); // alpha
+    }
+
     queue.write_texture(
         input_texture.as_image_copy(),
-        bytemuck::cast_slice(&pixels),
+        &rgba8,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(4 * width),
@@ -196,7 +212,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         view_formats: &[],
     });
 
+    // --- Bind Group ---
+
+    let settings_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Settings Uniform Buffer"),
+        contents: bytemuck::bytes_of(&settings),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Pipeline BindGroupLayout"),
+        entries: &[
+            // binding 0: input texture
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                },
+                count: None,
+            },
+            // binding 1: output storage texture
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            },
+            // binding 2: uniform buffer
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: std::num::NonZeroU64::new(std::mem::size_of::<Settings>() as u64),
+                },
+                count: None,
+            },
+        ],
+    });
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Texture + Uniform BindGroup"),
+        layout: &bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&input_texture.create_view(&wgpu::TextureViewDescriptor::default())),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&output_texture.create_view(&wgpu::TextureViewDescriptor::default())),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: settings_buffer.as_entire_binding(),
+            },
+        ],
+    });
+
     // --- Create compute pipeline ---
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Compute Pipeline Layout"),
+        bind_group_layouts: &[&bind_group_layout],
+        push_constant_ranges: &[],
+    });
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Grayscale Shader"),
@@ -205,32 +293,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("Grayscale Pipeline"),
-        layout: None,
+        layout: Some(&pipeline_layout),
         module: &shader,
         entry_point: Some("shader_main"),
         compilation_options: wgpu::PipelineCompilationOptions::default(),
         cache: None,
-    });
-
-    // --- Bind Group ---
-
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Textures Bind Group"),
-        layout: &pipeline.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(
-                    &input_texture.create_view(&Default::default()),
-                ),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(
-                    &output_texture.create_view(&Default::default()),
-                ),
-            },
-        ],
     });
 
     // --- Dispatch compute ---
@@ -460,14 +527,14 @@ struct Args {
     #[arg(default_value = "images/film_output.png")]
     image_out: String,
 
-    #[arg(short, long)]
-    exposure: Option<f32>,
+    #[arg(short, long, default_value_t = 0.0)]
+    exposure: f32,
 
-    #[arg(short, long)]
-    contrast: Option<f32>,
+    #[arg(short, long, default_value_t = 0.0)]
+    contrast: f32,
 
-    #[arg(short, long)]
-    saturation: Option<f32>,
+    #[arg(short, long, default_value_t = 0.0)]
+    saturation: f32,
 
     #[arg(default_value_t = 1.4)]
     density_saturation: f32,
@@ -477,6 +544,14 @@ struct Args {
 
     #[arg(default_value_t = 0.4)]
     x0_offset: f32
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct Settings {
+    exposure: f32,
+    contrast: f32,
+    saturation: f32
 }
 /*
 - Exposure
