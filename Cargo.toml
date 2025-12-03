@@ -12,6 +12,9 @@ clap = { version = "4.5.53", features = ["derive"] }
 anyhow = "1.0.100"
 wgpu = "27.0.1"
 bytemuck = "1.24.0"
+bevy = "0.17.3"
+bevy_egui = "0.38.0"
+egui-wgpu = "0.33.2"
 [build-dependencies]
 pkg-config = "0.3.32"
 bindgen = "0.72.1"
