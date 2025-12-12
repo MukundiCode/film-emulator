@@ -4,20 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-pollster = "0.3"
 image = "0.25.9"
-rawloader = "0.37.1"
-libraw = "0.1.1"
-clap = { version = "4.5.53", features = ["derive"] }
-anyhow = "1.0.100"
-wgpu = "27.0.1"
-bytemuck = "1.24.0"
-bevy = "0.17.3"
-bevy_egui = "0.38.0"
-egui-wgpu = "0.33.2"
+egui = "0.33.3"
+eframe = "0.33.3"
 [build-dependencies]
 pkg-config = "0.3.32"
 bindgen = "0.72.1"
-anyhow = "1.0"
-bytemuck = "1.9"
-pollster = "0.2"

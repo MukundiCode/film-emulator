@@ -3,7 +3,7 @@ use std::slice;
 use image::ImageReader;
 use crate::{libraw_close, libraw_dcraw_clear_mem, libraw_dcraw_make_mem_image, libraw_dcraw_process, libraw_init, libraw_open_file, libraw_unpack};
 
-fn load_image_to_linear_rgb(path: &String) -> (u32, u32, Vec<[f32; 3]>) {
+pub fn load_image_to_linear_rgb(path: &String) -> (u32, u32, Vec<[f32; 3]>) {
     let lower = path.to_lowercase();
     let is_raw = lower.ends_with(".dng") || lower.ends_with(".cr2") ||
         lower.ends_with(".nef") || lower.ends_with(".arw") ||

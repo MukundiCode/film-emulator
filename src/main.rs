@@ -3,78 +3,119 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-mod pipeline;
 mod image_loader;
-mod window;
 
-use image::{Rgb};
-use std::default::Default;
 use std::env;
-use clap::Parser;
-use bevy::prelude::*;
-use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
-
+use eframe::egui;
+use egui::{AtomExt, Color32};
+use crate::image_loader::load_image_to_linear_rgb;
 
 // 2. INCLUDE THE GENERATED BINDINGS
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
-// --- MATH HELPER FUNCTIONS ---
-
-fn mix(a: f32, b: f32, t: f32) -> f32 {
-    a * (1.0 - t) + b * t
-}
-
-fn dot(v1: [f32; 3], v2: [f32; 3]) -> f32 {
-    v1[0] * v2[0] + v1[1] * v2[1] + v1[2] * v2[2]
-}
-
 
 fn main() {
-    
-    // let (width, height, pixels) = load_image_to_linear_rgb(&args.image_in);
-    // take in image, for now just add a sample image
-    // init app, should return an object Settings
-    // pass to pipeline, which should return a texture
-    // texture should be passed into the app, first converted into the egui texture
+
+    let native_options = eframe::NativeOptions::default();
+    eframe::run_native("My egui App", native_options, Box::new(|cc| Ok(Box::new(FilmEmulator::new(cc)))));
 
 }
 
-trait Node {
-    fn transform(&self, pixel: Rgb<f32>) -> Rgb<f32>;
+#[derive(Default)]
+struct FilmEmulator {
+    controls: ImageControls,
+    image: ImageTextureView
 }
 
-struct SubtractiveDensityNode {
-    density_saturation: f32
-}
-
-impl Node for SubtractiveDensityNode {
-    fn transform(&self, pixel: Rgb<f32>) -> Rgb<f32> {
-        let cmy = [1.0 - pixel.0[0], 1.0 - pixel.0[1], 1.0 - pixel.0[2]];
-        let luma_weights = [0.2126, 0.7152, 0.0722];
-        let dye_luma = dot(cmy, luma_weights);
-
-        let cmy_dense = [
-            mix(dye_luma, cmy[0], self.density_saturation),
-            mix(dye_luma, cmy[1], self.density_saturation),
-            mix(dye_luma, cmy[2], self.density_saturation)
-        ];
-
-        Rgb([
-            (1.0 - cmy_dense[0]).clamp(0.0, 1.0),
-            (1.0 - cmy_dense[1]).clamp(0.0, 1.0),
-            (1.0 - cmy_dense[2]).clamp(0.0, 1.0)
-        ])
+impl FilmEmulator {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        Self {
+            controls: ImageControls::default(),
+            image: ImageTextureView::default()
+        }
     }
 }
 
-struct FilmCurveNode {
-    k_contrast: f32,
-    x0_offset: f32
-}
-
-impl Node for FilmCurveNode {
-    fn transform(&self, pixel: Rgb<f32>) -> Rgb<f32> {
-        Rgb(pixel.0.map(|x| 1.0 / (1.0 + (-self.k_contrast * (x - self.x0_offset)).exp())))
+impl eframe::App for FilmEmulator {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            self.controls.ui(ui);
+            self.image.ui(ui);// ← YOUR VIEW RUNS HERE
+        });
     }
 }
+
+trait View {
+    fn ui(&mut self, ui: &mut egui::Ui);
+}
+
+
+struct ImageControls {
+    exposure: i32,
+    contrast: i32,
+    saturation: i32,
+    brightness: i32,
+    highlights: i32,
+    shadows: i32
+}
+
+impl Default for ImageControls {
+    fn default() -> Self {
+        Self {
+            exposure: 0,
+            contrast: 0,
+            saturation: 0,
+            brightness: 0,
+            highlights: 0,
+            shadows: 0,
+        }
+    }
+}
+
+impl View for ImageControls {
+    fn ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Image Controls");
+
+        ui.add(egui::Slider::new(&mut self.exposure, -100..=100).text("Exposure"));
+        ui.add(egui::Slider::new(&mut self.contrast, -100..=100).text("Contrast"));
+        ui.add(egui::Slider::new(&mut self.saturation, -100..=100).text("Saturation"));
+        ui.add(egui::Slider::new(&mut self.brightness, -100..=100).text("Brightness"));
+        ui.add(egui::Slider::new(&mut self.highlights, -100..=100).text("Highlights"));
+        ui.add(egui::Slider::new(&mut self.shadows, -100..=100).text("Shadows"));
+    }
+}
+
+#[derive(Default)]
+struct ImageTextureView {
+    texture: Option<egui::TextureHandle>,
+}
+
+impl ImageTextureView {
+    fn ui(&mut self, ui: &mut egui::Ui) {
+        let texture: &egui::TextureHandle = self.texture.get_or_insert_with(|| {
+            // Load the texture only once.
+            let (width, height, pixels) = load_image_to_linear_rgb(&"images/DSC00495.ARW".to_string());
+            let colour_32 = pixels.into_iter().map(|it|  {
+                let denormalized: [u8; 3] = [
+                    (it[0] * 255.0).clamp(0.0, 255.0) as u8,
+                    (it[1] * 255.0).clamp(0.0, 255.0) as u8,
+                    (it[2] * 255.0).clamp(0.0, 255.0) as u8,
+                ];
+                Color32::from_rgba_unmultiplied(denormalized[0], denormalized[1], denormalized[2], 255)
+            }).collect();
+            
+            ui.ctx().load_texture(
+                "my-image",
+                egui::ColorImage::new([width as usize, height as usize], colour_32),
+                Default::default()
+            )
+        });
+
+        // Show the image:
+        ui.add(egui::Image::new((texture.id(), texture.size_vec2())).max_width(1000.0));
+    }
+}
+
+
+
 
