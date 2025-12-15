@@ -1001,6 +1001,7 @@ dependencies = [
  "objc2-foundation 0.2.2",
  "parking_lot",
  "percent-encoding",
+ "pollster",
  "profiling",
  "raw-window-handle",
  "static_assertions",
@@ -1008,6 +1009,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "web-time",
+ "wgpu",
  "windows-sys 0.61.2",
  "winit",
 ]
@@ -1273,9 +1275,11 @@ name = "film-emulator"
 version = "0.1.0"
 dependencies = [
  "bindgen",
+ "bytemuck",
  "eframe",
  "egui",
  "image",
+ "naga",
  "pkg-config",
 ]
 
@@ -2048,9 +2052,9 @@ dependencies = [
 
 [[package]]
 name = "naga"
-version = "27.0.3"
+version = "27.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "066cf25f0e8b11ee0df221219010f213ad429855f57c494f995590c861a9a7d8"
+checksum = "12b2e757b11b47345d44e7760e45458339bc490463d9548cd8651c53ae523153"
 dependencies = [
  "arrayvec",
  "bit-set",
@@ -2670,6 +2674,12 @@ dependencies = [
  "rustix 1.1.2",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "pollster"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
 
 [[package]]
 name = "portable-atomic"
